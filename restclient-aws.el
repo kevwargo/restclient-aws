@@ -145,16 +145,14 @@
      (restclient-aws--log "%S: unexpected %S" proc resp))))
 
 (defun restclient-aws--read-mfa (resp)
-  (let ((code (read-from-minibuffer
-               (format "Enter MFA code for profile %s%s%s"
-                       (alist-get 'profile resp)
-                       (if (alist-get 'role-arn resp)
-                           (format ", %s" (alist-get 'role-arn resp))
-                         "")
-                       (if (alist-get 'serial-number resp)
-                           (format ", %s" (alist-get 'serial-number resp))
-                         "")))))
-    (concat code "\n")))
+  (let* ((profile (format "profile %s" (alist-get 'profile resp)))
+         (role (alist-get 'role-arn resp))
+         (role (if role (format ", role %s" role) ""))
+         (serial (alist-get 'serial-number resp))
+         (serial (if serial (format ", serial %s" serial) "")))
+    (concat (read-from-minibuffer
+             (format "Enter MFA code for %s%s%s: " profile role serial))
+            "\n")))
 
 (defun restclient-aws--complete-request (request)
   (apply (plist-get request :send-fn)
