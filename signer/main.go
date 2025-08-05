@@ -3,15 +3,21 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 )
@@ -43,32 +49,88 @@ type connServer struct {
 }
 
 func (s connServer) serveConn(conn net.Conn) {
-	if err := s.sendCreds(conn); err != nil {
-		fmt.Fprint(conn, err)
-		log.Println(err)
+	r, err := s.signRequest(conn)
+	if err != nil {
+		sendResponse(errorResp{ErrMsg: err.Error()}, conn)
+	} else {
+		resp := signedHeaders{
+			Headers: make(map[string]string),
+		}
+		for key, value := range r.Header {
+			if len(value) > 0 {
+				resp.Headers[key] = value[0]
+			}
+		}
+
+		if err = sendResponse(resp, conn); err != nil {
+			log.Println(err)
+		}
 	}
 
-	if err := conn.Close(); err != nil {
+	if err = conn.Close(); err != nil {
 		log.Println(err)
 	}
 }
 
-func (s connServer) sendCreds(conn net.Conn) error {
+type request struct {
+	Profile string            `json:"profile"`
+	Region  string            `json:"region"`
+	Service *string           `json:"service"`
+	Method  string            `json:"method"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
+	Body    string            `json:"body"`
+}
+
+func (s connServer) signRequest(conn net.Conn) (*http.Request, error) {
 	var req request
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {
-		return err
+		return nil, err
+	}
+
+	u, err := url.Parse(req.URL)
+	if err != nil {
+		return nil, err
+	}
+
+	httpRequest := &http.Request{
+		Method: req.Method,
+		URL:    u,
+		Header: make(http.Header),
+		Body:   io.NopCloser(strings.NewReader(req.Body)),
+	}
+
+	for key, value := range req.Headers {
+		httpRequest.Header.Add(key, value)
 	}
 
 	creds, err := s.getCreds(req.Profile, conn)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return sendResponse(credsResponse{
-		KeyId:        creds.AccessKeyID,
-		SecretKey:    creds.SecretAccessKey,
-		SessionToken: creds.SessionToken,
-	}, conn)
+	service := "execute-api"
+	if req.Service != nil {
+		service = *req.Service
+	}
+
+	h := sha256.New()
+	h.Write([]byte(req.Body))
+	payloadHash := hex.EncodeToString(h.Sum(nil))
+
+	log.Printf("signing %+v with payload %q (hash %s)", httpRequest, req.Body, payloadHash)
+
+	ctx := context.Background()
+	now := time.Now()
+	signer := v4.NewSigner()
+	err = signer.SignHTTP(ctx, creds, httpRequest, payloadHash, service, req.Region, now)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("request %+v signed", httpRequest)
+
+	return httpRequest, nil
 }
 
 func (s connServer) getCreds(profile string, conn net.Conn) (aws.Credentials, error) {
@@ -99,20 +161,6 @@ func (s connServer) getCreds(profile string, conn net.Conn) (aws.Credentials, er
 	return creds, nil
 }
 
-type request struct {
-	Profile string `json:"profile"`
-}
-
-type credsResponse struct {
-	KeyId        string `json:"key-id"`
-	SecretKey    string `json:"secret-key"`
-	SessionToken string `json:"session-token,omitempty"`
-}
-
-func (r credsResponse) name() string {
-	return "creds"
-}
-
 func createMFAProvider(o *stscreds.AssumeRoleOptions, profile string, conn net.Conn) func() (string, error) {
 	return func() (string, error) {
 		err := sendResponse(mfaPrompt{
@@ -134,16 +182,6 @@ func createMFAProvider(o *stscreds.AssumeRoleOptions, profile string, conn net.C
 	}
 }
 
-type mfaPrompt struct {
-	Profile      string  `json:"profile"`
-	RoleARN      string  `json:"role-arn,omitempty"`
-	SerialNumber *string `json:"serial-number,omitempty"`
-}
-
-func (r mfaPrompt) name() string {
-	return "mfa-prompt"
-}
-
 type response interface {
 	name() string
 }
@@ -161,6 +199,32 @@ func sendResponse(resp response, conn net.Conn) error {
 
 	fields["type"] = resp.name()
 	return json.NewEncoder(conn).Encode(fields)
+}
+
+type signedHeaders struct {
+	Headers map[string]string `json:"headers"`
+}
+
+func (r signedHeaders) name() string {
+	return "signed"
+}
+
+type mfaPrompt struct {
+	Profile      string  `json:"profile"`
+	RoleARN      string  `json:"role-arn,omitempty"`
+	SerialNumber *string `json:"serial-number,omitempty"`
+}
+
+func (r mfaPrompt) name() string {
+	return "mfa-prompt"
+}
+
+type errorResp struct {
+	ErrMsg string `json:"err-msg"`
+}
+
+func (r errorResp) name() string {
+	return "error"
 }
 
 func checkErr(err error) {
