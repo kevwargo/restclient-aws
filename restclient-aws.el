@@ -167,7 +167,10 @@
          (plist-get request :handle-args)))
 
 (defun restclient-aws--log (fmt &rest args)
-  (let ((msg (apply 'format fmt args)))
+  (let ((msg (apply 'format
+                    (concat "[%s] " fmt)
+                    (format-time-string "%Y%m%d-%H%M%S.%3N")
+                    args)))
     (with-current-buffer (get-buffer-create "*restclient-aws-log*")
       (setq display-line-numbers t)
       (goto-char (point-max))
