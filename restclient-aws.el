@@ -31,31 +31,60 @@
   (expand-file-name "signer" restclient-aws--cache-dir))
 
 (defun restclient-aws--connect ()
-  (let ((resp ""))
-    (condition-case err
-        (make-network-process
-         :name "aws-signer-client"
-         :family 'local
-         :service restclient-aws--signer-socket
-         :filter (lambda (_ string)
-                   (setq resp (concat resp string)))
-         :sentinel (lambda (_ event)
-                     (pcase event
-                       ((or "connection broken by remote peer\n" "finished\n" "deleted\n")
-                        (restclient-aws--log "aws-sign resp: %S"
-                                             (json-parse-string resp
-                                                                :object-type 'alist
-                                                                :array-type 'list)))
-                       ((rx line-start "open") nil)
-                       (_ (restclient-aws--log "unexpected proc event %S, resp: %s" event resp)))))
-      (file-missing)
-      (file-error (if (and (equal (nth 2 err) "Connection refused")
-                           (file-exists-p restclient-aws--signer-socket))
-                      'socket-unbound
-                    (signal (car err) (cdr err)))))))
+  (condition-case err
+      (make-network-process
+       :name "aws-signer-client"
+       :family 'local
+       :service restclient-aws--signer-socket
+       :sentinel 'restclient-aws--client-sentinel
+       :filter 'restclient-aws--client-filter)
+    (file-missing)
+    (file-error (if (and (equal (nth 2 err) "Connection refused")
+                         (file-exists-p restclient-aws--signer-socket))
+                    'socket-unbound
+                  (signal (car err) (cdr err))))))
 
-(defun restclient-aws--sign ()
-  (interactive)
+(defun restclient-aws--client-sentinel (p event)
+  (pcase event
+    ((or "connection broken by remote peer\n" "finished\n" "deleted\n")
+     (restclient-aws--log "%S is done: %s" p (s-trim event))
+     (if (process-buffer p) (kill-buffer (process-buffer p))))
+    ((rx line-start "open")
+     (restclient-aws--log "opened aws-signer-client proc %S" p))
+    (_ (restclient-aws--log "unexpected proc %S event %S"
+                            p event))))
+
+(defun restclient-aws--client-filter (p input)
+  (let (resp received)
+    (with-current-buffer (or (process-buffer p)
+                             (set-process-buffer p (generate-new-buffer "*aws-signer-client*")))
+      (goto-char (point-max))
+      (insert input)
+      (goto-char (or (process-get p :json-point) (point-min)))
+      (condition-case e
+          (json-parse-buffer :object-type 'alist)
+        (json-end-of-file)
+        (error (restclient-aws--log "parsing json response in %S: %S"
+                                    (current-buffer) e))
+        (:success
+         (setq resp e received t)
+         (process-put p :json-point (point)))))
+    (if received
+        (restclient-aws--handle-server-resp p resp))))
+
+(defun restclient-aws--handle-server-resp (proc resp)
+  (pcase (alist-get 'type resp)
+    ("mfa-prompt" (process-send-string proc
+                                       (concat (read-from-minibuffer
+                                                (format "%S: "
+                                                        (cl-remove-if (lambda (f)
+                                                                        (eq (car f) 'type))
+                                                                      resp)))
+                                               "\n")))
+    (_ (restclient-aws--log "%S: %S" proc resp))))
+
+(defun restclient-aws--sign (profile)
+  (interactive "MAWS profile: ")
   (let ((client (restclient-aws--connect)))
     (unless (processp client)
       (restclient-aws--log "first attempt to connect to signer server failed, trying again")
@@ -77,7 +106,8 @@
           (setq client (restclient-aws--connect))))
       (unless (processp client)
         (user-error "Cannot connect to %s" restclient-aws--signer-socket)))
-    (restclient-aws--log "%S connected to %s" client restclient-aws--signer-socket)))
+    (restclient-aws--log "%S connected to %s" client restclient-aws--signer-socket)
+    (process-send-string client (json-serialize `((profile . ,profile))))))
 
 (defun restclient-aws--log (fmt &rest args)
   (let ((msg (apply 'format fmt args)))
