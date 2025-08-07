@@ -118,8 +118,6 @@ func (s connServer) signRequest(conn net.Conn) (*http.Request, error) {
 	h.Write([]byte(req.Body))
 	payloadHash := hex.EncodeToString(h.Sum(nil))
 
-	log.Printf("signing %+v with payload %q (hash %s)", httpRequest, req.Body, payloadHash)
-
 	ctx := context.Background()
 	now := time.Now()
 	signer := v4.NewSigner()
@@ -127,8 +125,6 @@ func (s connServer) signRequest(conn net.Conn) (*http.Request, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	log.Printf("request %+v signed", httpRequest)
 
 	return httpRequest, nil
 }
