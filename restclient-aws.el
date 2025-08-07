@@ -50,20 +50,21 @@
                                                 "el"))))))
 
 (defun restclient-aws--sign (profile region service request)
-  (let ((init-client-fn (lambda (client)
-                   (process-put client :request request)
-                   (process-send-string client
-                                        (json-serialize
-                                         `((profile . ,profile)
-                                           (region . ,region)
-                                           (service . ,service)
-                                           (method . ,(plist-get request :method))
-                                           (url . ,(plist-get request :url))
-                                           (headers . ,(mapcar (lambda (h)
-                                                                 (cons (intern (car h)) (cdr h)))
-                                                               (plist-get request :headers)))
-                                           (body . ,(plist-get request :body)))
-                                         :null-object nil))))
+  (let ((init-client-fn
+         (lambda (client)
+           (process-put client :request request)
+           (process-send-string client
+                                (json-serialize
+                                 `((profile . ,profile)
+                                   (region . ,region)
+                                   (service . ,service)
+                                   (method . ,(plist-get request :method))
+                                   (url . ,(plist-get request :url))
+                                   (headers . ,(mapcar (lambda (h)
+                                                         (cons (intern (car h)) (cdr h)))
+                                                       (plist-get request :headers)))
+                                   (body . ,(plist-get request :body)))
+                                 :null-object nil))))
         (client (restclient-aws--connect)))
     (if client
         (funcall init-client-fn client)
